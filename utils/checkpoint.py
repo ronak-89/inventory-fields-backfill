@@ -6,6 +6,7 @@ import os
 from datetime import datetime
 from typing import Any, Optional
 
+import certifi
 from pymongo import MongoClient
 
 MONGO_URI = os.getenv("MONGO_URI")
@@ -20,7 +21,8 @@ def get_checkpoint_collection(collection_name: str):
     """Get MongoDB collection for checkpoint."""
     global _client, _db
     if _client is None:
-        _client = MongoClient(MONGO_URI)
+        # Use certifi CA bundle for TLS (fixes Atlas SSL in Docker/slim images)
+        _client = MongoClient(MONGO_URI, tlsCAFile=certifi.where())
         _db = _client[MONGO_DB_NAME]
     return _db[collection_name]
 
