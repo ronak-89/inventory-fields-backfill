@@ -37,7 +37,7 @@ from utils.checkpoint import (
     save_checkpoint,
     close_checkpoint_client,
 )
-from utils.typesense_client import update_document_ignore_not_found
+from utils.typesense_client import update_document_ignore_not_found, ensure_backfill_schema_fields
 
 # ================= CONFIG =================
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", 1000))
@@ -60,6 +60,7 @@ DELETED_AT_CHECKPOINT_DEFAULT = {
     "updated_supabase": 0,
     "updated_typesense": 0,
     "last_id": "",
+    "batch_no": 0,
 }
 
 
@@ -109,6 +110,8 @@ def init_connections():
     validate_env()
     ensure_db_alive()
     get_checkpoint_collection(MONGO_COLLECTION)
+    # Ensure Typesense schema has created_at and deleted_at before backfill
+    ensure_backfill_schema_fields()
 
 
 def cleanup():
@@ -154,16 +157,23 @@ def run():
         init_connections()
         state = load_state()
         last_id = state.get("last_id", "")
-        total_processed = state.get("total_processed", 0)
-        updated_supabase = state.get("updated_supabase", 0)
-        updated_typesense = state.get("updated_typesense", 0)
+        total_processed = int(state.get("total_processed") or 0)
+        updated_supabase = int(state.get("updated_supabase") or 0)
+        updated_typesense = int(state.get("updated_typesense") or 0)
+        batch_no = int(state.get("batch_no") or 0)
 
         _state["total_processed"] = total_processed
         _state["updated_supabase"] = updated_supabase
         _state["updated_typesense"] = updated_typesense
         _state["last_id"] = last_id
+        _state["batch_no"] = batch_no
 
-        batch_no = 0
+        if last_id:
+            print_flush(
+                f"📂 Resumed from checkpoint | last_id={last_id[:8]}... | "
+                f"total_processed={total_processed} | batch_no={batch_no}"
+            )
+
         while True:
             if shutdown_requested:
                 break
@@ -186,6 +196,7 @@ def run():
             u_sb, u_ts, state = process_batch(rows, dict(_state))
             _state.update(state)
             _state["last_id"] = last_id
+            _state["batch_no"] = batch_no
             save_state(_state)
 
             print_flush(

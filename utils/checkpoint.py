@@ -37,8 +37,18 @@ def load_checkpoint(
         doc = {"_id": checkpoint_id, **default}
         col.insert_one(doc)
         return dict(default)
-    # Return only checkpoint fields (exclude _id for easier use)
-    return {k: doc.get(k, default.get(k)) for k in default}
+    # Return only checkpoint fields; normalize types (MongoDB may return int32/float for numbers)
+    out = {}
+    for k in default:
+        v = doc.get(k, default.get(k))
+        if isinstance(default.get(k), int) and v is not None and not isinstance(v, bool):
+            try:
+                out[k] = int(v)
+            except (TypeError, ValueError):
+                out[k] = default.get(k)
+        else:
+            out[k] = v
+    return out
 
 
 def save_checkpoint(

@@ -35,7 +35,12 @@ from utils.checkpoint import (
     save_checkpoint,
     close_checkpoint_client,
 )
-from utils.typesense_client import get_typesense_client, TYPESENSE_COLLECTION, update_document_ignore_not_found
+from utils.typesense_client import (
+    get_typesense_client,
+    TYPESENSE_COLLECTION,
+    update_document_ignore_not_found,
+    ensure_backfill_schema_fields,
+)
 
 # ================= CONFIG =================
 BATCH_SIZE = int(os.getenv("BATCH_SIZE", 1000))
@@ -80,6 +85,7 @@ CREATED_AT_CHECKPOINT_DEFAULT = {
     "default_set_count": 0,
     "last_id": "",
     "last_page": 0,
+    "batch_no": 0,
 }
 
 
@@ -130,6 +136,8 @@ def init_connections():
     ensure_db_alive()
     get_checkpoint_collection(MONGO_COLLECTION)
     get_typesense_client()
+    # Ensure Typesense schema has created_at and deleted_at before backfill
+    ensure_backfill_schema_fields()
 
 
 def cleanup():
@@ -143,17 +151,24 @@ def run_phase1():
     """Cursor over products; update Typesense created_at for each batch."""
     state = load_state()
     last_id = state.get("last_id", "")
-    total_processed = state.get("total_processed", 0)
-    updated_typesense = state.get("updated_typesense", 0)
+    total_processed = int(state.get("total_processed") or 0)
+    updated_typesense = int(state.get("updated_typesense") or 0)
+    batch_no = int(state.get("batch_no") or 0)
 
     _state["phase"] = 1
     _state["total_processed"] = total_processed
     _state["updated_typesense"] = updated_typesense
-    _state["default_set_count"] = state.get("default_set_count", 0)
+    _state["default_set_count"] = int(state.get("default_set_count") or 0)
     _state["last_id"] = last_id
     _state["last_page"] = 0
+    _state["batch_no"] = batch_no
 
-    batch_no = 0
+    if last_id:
+        print_flush(
+            f"📂 Phase 1 resumed from checkpoint | last_id={last_id[:8]}... | "
+            f"total_processed={total_processed} | batch_no={batch_no}"
+        )
+
     while True:
         if shutdown_requested:
             return
@@ -172,7 +187,6 @@ def run_phase1():
             save_state(_state)
             return
 
-        batch_no += 1
         last_row = rows[-1]
         last_id = last_row["id"]
 
@@ -186,11 +200,13 @@ def run_phase1():
             if update_document_ignore_not_found(pid, {"created_at": ts}):
                 updated += 1
 
+        batch_no += 1
         total_processed += len(rows)
         updated_typesense += updated
         _state["total_processed"] = total_processed
         _state["updated_typesense"] = updated_typesense
         _state["last_id"] = last_id
+        _state["batch_no"] = batch_no
         save_state(_state)
 
         print_flush(
@@ -204,26 +220,34 @@ def run_phase1():
 def run_phase2():
     """Paginate Typesense; for docs not in Postgres set created_at = 0."""
     state = load_state()
-    page = state.get("last_page", 0)
-    default_set_count = state.get("default_set_count", 0)
+    page = int(state.get("last_page") or 0)
+    default_set_count = int(state.get("default_set_count") or 0)
+    batch_no = int(state.get("batch_no") or 0)
 
     _state["phase"] = 2
-    _state["total_processed"] = state.get("total_processed", 0)
-    _state["updated_typesense"] = state.get("updated_typesense", 0)
+    _state["total_processed"] = int(state.get("total_processed") or 0)
+    _state["updated_typesense"] = int(state.get("updated_typesense") or 0)
     _state["default_set_count"] = default_set_count
     _state["last_id"] = state.get("last_id", "")
     _state["last_page"] = page
+    _state["batch_no"] = batch_no
+
+    if page > 0:
+        print_flush(
+            f"📂 Phase 2 resumed from checkpoint | page={page} | "
+            f"default_set_count={default_set_count} | batch_no={batch_no}"
+        )
 
     ts_client = get_typesense_client()
-    batch_no = 0
     while True:
         if shutdown_requested:
             return
         try:
+            # id cannot be used in query_by; use a searchable field to paginate (q=* matches all)
             result = ts_client.collections[TYPESENSE_COLLECTION].documents.search(
                 {
                     "q": "*",
-                    "query_by": "id",
+                    "query_by": "product_name",
                     "per_page": TYPESENSE_PAGE_SIZE,
                     "page": page,
                 }
@@ -255,7 +279,9 @@ def run_phase2():
 
         batch_no += 1
         _state["default_set_count"] = default_set_count
-        _state["last_page"] = page
+        # Save next page so resume starts from there (no re-process of this page)
+        _state["last_page"] = page + 1
+        _state["batch_no"] = batch_no
         save_state(_state)
 
         print_flush(
