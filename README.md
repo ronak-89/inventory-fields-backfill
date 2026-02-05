@@ -135,6 +135,19 @@ Checkpoint is written after each batch and on SIGINT/SIGTERM. Updates are idempo
 - Keep `SLEEP_BETWEEN_BATCHES` to avoid overloading (e.g. 1.0–2.0).
 - Ensure MongoDB and PostgreSQL timeouts and connection limits are sufficient for long-running jobs.
 
+## Troubleshooting
+
+### MongoDB SSL handshake failed (e.g. on staging / in Docker)
+
+If you see `ServerSelectionTimeoutError: SSL handshake failed ... TLSV1_ALERT_INTERNAL_ERROR` when connecting to MongoDB Atlas from the container (while it works locally), the image was updated to install and refresh CA certificates. Rebuild and run:
+
+```bash
+docker compose build --no-cache backfill-inventory-fields
+docker compose up -d backfill-inventory-fields
+```
+
+If it still fails, switch the Dockerfile base image from `python:3.11-slim` to `python:3.11` (full image) so the container uses the same OpenSSL and certs as a full Debian environment.
+
 ## Reference
 
 - Migration design and field semantics: see repo docs **`docs/inventory_fields_migration_guide.md`** and **`docs/inventory_fields_migration_summary.md`**.

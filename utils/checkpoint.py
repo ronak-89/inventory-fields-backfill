@@ -20,7 +20,7 @@ def get_checkpoint_collection(collection_name: str):
     """Get MongoDB collection for checkpoint."""
     global _client, _db
     if _client is None:
-        _client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+        _client = MongoClient(MONGO_URI)
         _db = _client[MONGO_DB_NAME]
     return _db[collection_name]
 
