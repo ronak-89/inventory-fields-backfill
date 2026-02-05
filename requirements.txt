@@ -1,0 +1,4 @@
+psycopg2-binary==2.9.9
+pymongo==4.15.5
+python-dotenv==1.0.0
+typesense==0.21.0
