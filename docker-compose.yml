@@ -1,29 +1,13 @@
-# Run one backfill at a time on a server. Use different compose files or override command for the other script.
 services:
-  backfill-deleted-at:
+  backfill-inventory-fields:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: inventory-backfill-deleted-at
+    container_name: inventory-backfill-fields
     restart: "no"
     env_file:
       - .env
     environment:
       - PYTHONUNBUFFERED=1
     network_mode: host
-    command: ["python", "backfill_deleted_at.py"]
-
-  backfill-created-at:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: inventory-backfill-created-at
-    restart: "no"
-    env_file:
-      - .env
-    environment:
-      - PYTHONUNBUFFERED=1
-    network_mode: host
-    command: ["python", "backfill_created_at_from_supabase.py"]
-    profiles:
-      - created-at
+    command: ["python", "backfill_inventory_fields.py"]

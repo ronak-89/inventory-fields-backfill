@@ -1,11 +1,16 @@
 # Inventory Fields Backfill
 
-**Standalone backfill scripts** for the inventory `deleted_at` and `created_at` migration. Same structure as `scrape-manuals-for-inventory`: cursor-based batching, MongoDB checkpoint, and Docker so you can deploy on any server and run against ~3.5M records.
+**Standalone backfill** for the inventory `deleted_at` and `created_at` migration. Same structure as `scrape-manuals-for-inventory`: cursor-based batching, MongoDB checkpoint, and Docker so you can deploy on any server and run against ~3.5M records.
 
 ## Overview
 
-- **`backfill_deleted_at.py`** — Sets `deleted_at = 0` for all existing products in PostgreSQL (Supabase) and Typesense. Cursor over `public.products` by `id`; batch updates both stores; resumable via MongoDB checkpoint.
-- **`backfill_created_at_from_supabase.py`** — Syncs `created_at` from Supabase to Typesense. Phase 1: cursor over products, update Typesense per batch. Phase 2: paginate Typesense, set `created_at = 0` for docs not in Supabase. Resumable via checkpoint.
+- **`backfill_inventory_fields.py`** — One script, **one pass** for both fields: (1) ensures Typesense schema has `created_at` and `deleted_at`, (2) **Phase 1:** cursor over products from Supabase — each batch updates Supabase (`deleted_at = 0` where null) and Typesense (`deleted_at = 0` and `created_at` from Supabase as Unix timestamp), (3) **Phase 2:** documents that exist only in Typesense (not in Supabase) get `created_at = 0` and `deleted_at = 0` set manually. Single checkpoint; resumable.
+
+### Field semantics
+
+- **`deleted_at`** — Set to `0` everywhere: in Supabase where it is null (Phase 1), and in Typesense for every product (Phase 1) and for Typesense-only docs (Phase 2). After backfill, `0` = active, `>= 1` = deleted (timestamp); no NULLs.
+
+- **`created_at`** — **Taken from Supabase** for products that exist there: Phase 1 reads `created_at` from `public.products` and syncs it to Typesense as a Unix timestamp. For documents that exist **only in Typesense** (no row in Supabase), we **manually set** `created_at = 0` in Phase 2 so every Typesense document has a defined value for filtering.
 
 ### Why update Supabase when `deleted_at` already exists (as NULL)?
 
@@ -19,23 +24,17 @@ So the backfill normalizes “no value” (NULL) into the canonical “active”
 
 ### Flow after backfill
 
-1. **Backfill** — Run `backfill_deleted_at.py` (then `backfill_created_at_from_supabase.py`).
+1. **Backfill** — Run `backfill_inventory_fields.py` once.
 2. **App code** — In list/count/search: filter with `deleted_at < 1` (Supabase and Typesense). On create: set `deleted_at = 0`. On delete: set `deleted_at = <timestamp>` (soft delete). No NULL checks.
 3. **Ongoing** — New rows get `deleted_at = 0`; deleted rows get `deleted_at >= 1`. No further backfill needed.
 
-Both scripts:
-
-- Use **cursor-based pagination** (no full-table load).
-- Save progress in **MongoDB** (checkpoint) so you can stop/restart or run on another server.
-- Handle **SIGINT/SIGTERM** (save checkpoint and exit).
-- Are **self-contained** in this folder (no dependency on parent monorepo at runtime).
+The script uses **cursor-based pagination**, saves progress in **MongoDB** (checkpoint), handles **SIGINT/SIGTERM**, and is **self-contained** in this folder.
 
 ## Structure
 
 ```
 inventory-fields-backfill/
-├── backfill_deleted_at.py              # Backfill deleted_at = 0
-├── backfill_created_at_from_supabase.py # Backfill created_at (Supabase → Typesense)
+├── backfill_inventory_fields.py   # Main script: schema + deleted_at + created_at
 ├── Dockerfile
 ├── docker-compose.yml
 ├── requirements.txt
@@ -44,9 +43,9 @@ inventory-fields-backfill/
 ├── .gitignore
 └── utils/
     ├── __init__.py
-    ├── checkpoint.py    # MongoDB checkpoint load/save
-    ├── db.py            # PostgreSQL connection + batch fetch/update
-    └── typesense_client.py  # Typesense client + document update
+    ├── checkpoint.py
+    ├── db.py
+    └── typesense_client.py
 ```
 
 ## Prerequisites
@@ -92,31 +91,16 @@ cp .env.example .env
 
 ### 3. Run with Docker Compose
 
-**Run only deleted_at backfill (default):**
-
 ```bash
-docker-compose up -d --build backfill-deleted-at
-docker-compose logs -f backfill-deleted-at
+docker-compose up -d --build backfill-inventory-fields
+docker-compose logs -f backfill-inventory-fields
 ```
 
-**Run only created_at backfill (e.g. on another server):**
+### 4. Run with Docker
 
 ```bash
-docker-compose --profile created-at up -d --build backfill-created-at
-docker-compose --profile created-at logs -f backfill-created-at
-```
-
-### 4. Run with Docker (single script)
-
-```bash
-# Build once
 docker build -t inventory-fields-backfill:latest .
-
-# Run deleted_at backfill
-docker run -d --name backfill-deleted-at --env-file .env --restart unless-stopped inventory-fields-backfill:latest
-
-# Run created_at backfill (different container)
-docker run -d --name backfill-created-at --env-file .env --restart unless-stopped inventory-fields-backfill:latest python backfill_created_at_from_supabase.py
+docker run -d --name backfill-fields --env-file .env --restart unless-stopped inventory-fields-backfill:latest
 ```
 
 ### 5. Run locally (no Docker)
@@ -124,25 +108,26 @@ docker run -d --name backfill-created-at --env-file .env --restart unless-stoppe
 ```bash
 pip install -r requirements.txt
 export $(cat .env | xargs)   # or use dotenv via .env
-python backfill_deleted_at.py
-# or
-python backfill_created_at_from_supabase.py
+python backfill_inventory_fields.py
 ```
 
 ## Checkpoints (MongoDB)
 
 - **Collection:** `MONGO_CHECKPOINT_COLLECTION` (default: `inventory_backfill_checkpoint`)
-- **deleted_at:** document `_id`: `backfill_deleted_at` — stores `last_id`, `total_processed`, `updated_supabase`, `updated_typesense`
-- **created_at:** document `_id`: `backfill_created_at` — stores `phase`, `last_id`, `last_page`, `total_processed`, `updated_typesense`, `default_set_count`
+- **Single document** `_id`: `backfill_inventory_fields` — stores `phase`, `last_id`, `last_page`, `batch_no`, `total_processed`, `updated_supabase`, `updated_typesense`, `default_set_count`
 
-You can stop (or move to another server with same MongoDB and env); on next run the script resumes from the checkpoint.
+### Resume behavior
+
+If the script stops (crash, kill, SIGTERM, etc.) and you run it again, it **resumes from where it stopped**:
+
+- **Phase 1:** We save `last_id` after each batch; restart fetches `id > last_id`. No re-processing of the last batch.
+- **Phase 2:** We save `last_page = page + 1`; restart starts from that page.
+
+Checkpoint is written after each batch and on SIGINT/SIGTERM. Updates are idempotent. You can stop or move to another server (same MongoDB and env).
 
 ## Order of execution
 
-1. Run **`backfill_deleted_at.py`** first (so all products have `deleted_at = 0` in both stores).
-2. Then run **`backfill_created_at_from_supabase.py`** (sync `created_at` to Typesense, then set default for Typesense-only docs).
-
-You can run them on the same machine (one after the other) or on different servers, as long as they share the same DB, Typesense, and MongoDB checkpoint.
+**`backfill_inventory_fields.py`** — **Phase 1:** One cursor over products from Supabase; each batch sets `deleted_at = 0` in Supabase (where null) and in Typesense, and syncs `created_at` from Supabase to Typesense (as Unix timestamp). **Phase 2:** Documents that exist only in Typesense (not in Supabase) get `created_at = 0` and `deleted_at = 0` set manually. Resumable via one MongoDB checkpoint.
 
 ## Configuration for large data (~3.5M)
 

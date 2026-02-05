@@ -10,8 +10,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY backfill_deleted_at.py backfill_created_at_from_supabase.py ./
+COPY backfill_inventory_fields.py ./
 COPY utils ./utils/
 
-# Default: run deleted_at backfill (override with command for created_at)
-CMD ["python", "backfill_deleted_at.py"]
+CMD ["python", "backfill_inventory_fields.py"]
